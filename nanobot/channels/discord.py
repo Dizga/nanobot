@@ -32,6 +32,7 @@ class DiscordChannel(BaseChannel):
         self._heartbeat_task: asyncio.Task | None = None
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._http: httpx.AsyncClient | None = None
+        self._dm_channels: dict[str, str] = {}  # user_id -> dm_channel_id
 
     async def start(self) -> None:
         """Start the Discord gateway connection."""
@@ -72,13 +73,66 @@ class DiscordChannel(BaseChannel):
             await self._http.aclose()
             self._http = None
 
+    async def _get_dm_channel(self, user_id: str) -> str | None:
+        """Open or retrieve a DM channel for a user ID."""
+        if user_id in self._dm_channels:
+            return self._dm_channels[user_id]
+
+        if not self._http:
+            return None
+
+        headers = {"Authorization": f"Bot {self.config.token}"}
+        try:
+            resp = await self._http.post(
+                f"{DISCORD_API_BASE}/users/@me/channels",
+                headers=headers,
+                json={"recipient_id": user_id},
+            )
+            resp.raise_for_status()
+            dm_channel_id = resp.json()["id"]
+            self._dm_channels[user_id] = dm_channel_id
+            return dm_channel_id
+        except Exception as e:
+            logger.error(f"Failed to open DM channel for {user_id}: {e}")
+            return None
+
+    async def _resolve_channel_id(self, chat_id: str) -> str | None:
+        """Resolve a chat_id to a valid Discord channel ID.
+
+        If chat_id is already a channel, use it directly.  If sending
+        fails with 404, treat it as a user ID and open a DM channel.
+        """
+        # First try sending to it as-is (works for real channel IDs)
+        headers = {"Authorization": f"Bot {self.config.token}"}
+        try:
+            resp = await self._http.get(
+                f"{DISCORD_API_BASE}/channels/{chat_id}",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                return chat_id
+        except Exception:
+            pass
+
+        # Treat as user ID and open a DM
+        return await self._get_dm_channel(chat_id)
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Discord REST API."""
         if not self._http:
             logger.warning("Discord HTTP client not initialized")
             return
 
-        url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
+        if not msg.content or not msg.content.strip():
+            logger.info(f"Skipping empty message to {msg.chat_id}")
+            return
+
+        channel_id = await self._resolve_channel_id(msg.chat_id)
+        if not channel_id:
+            logger.error(f"Could not resolve Discord channel for {msg.chat_id}")
+            return
+
+        url = f"{DISCORD_API_BASE}/channels/{channel_id}/messages"
         payload: dict[str, Any] = {"content": msg.content}
 
         if msg.reply_to:
@@ -105,7 +159,7 @@ class DiscordChannel(BaseChannel):
                     else:
                         await asyncio.sleep(1)
         finally:
-            await self._stop_typing(msg.chat_id)
+            await self._stop_typing(channel_id)
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""
@@ -197,6 +251,11 @@ class DiscordChannel(BaseChannel):
         if not self.is_allowed(sender_id):
             return
 
+        # For DMs (no guild_id), use sender_id as chat_id for stable session keys.
+        # For server channels, keep channel_id so multiple users share one session.
+        is_dm = not payload.get("guild_id")
+        effective_chat_id = sender_id if is_dm else channel_id
+
         content_parts = [content] if content else []
         media_paths: list[str] = []
         media_dir = Path.home() / ".nanobot" / "media"
@@ -228,13 +287,14 @@ class DiscordChannel(BaseChannel):
 
         await self._handle_message(
             sender_id=sender_id,
-            chat_id=channel_id,
+            chat_id=effective_chat_id,
             content="\n".join(p for p in content_parts if p) or "[empty message]",
             media=media_paths,
             metadata={
                 "message_id": str(payload.get("id", "")),
                 "guild_id": payload.get("guild_id"),
                 "reply_to": reply_to,
+                "discord_channel_id": channel_id,
             },
         )
 

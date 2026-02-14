@@ -59,12 +59,11 @@ class ContextBuilder:
                 parts.append(f"# Active Skills\n\n{always_content}")
         
         # 2. Available skills: only show summary (agent uses read_file to load)
-        skills_summary = self.skills.build_skills_summary()
+        skills_summary = self.skills.build_skills_summary(available_only=True)
         if skills_summary:
             parts.append(f"""# Skills
 
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
-Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
+To use a skill, read its SKILL.md file using the read_file tool.
 
 {skills_summary}""")
         
@@ -80,14 +79,7 @@ Skills with available="false" need dependencies installed first - you can try in
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
         
-        return f"""# nanobot 🐈
-
-You are nanobot, a helpful AI assistant. You have access to tools that allow you to:
-- Read, write, and edit files
-- Execute shell commands
-- Search the web and fetch web pages
-- Send messages to users on chat channels
-- Spawn subagents for complex background tasks
+        return f"""# nanobot
 
 ## Current Time
 {now} ({tz})
@@ -101,9 +93,7 @@ Your workspace is at: {workspace_path}
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
-IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
-Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
-For normal conversation, just respond with text - do not call the message tool.
+## Communication
 
 Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md

@@ -1,5 +1,6 @@
 """Cron tool for scheduling reminders and tasks."""
 
+from datetime import datetime
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
@@ -42,6 +43,10 @@ class CronTool(Tool):
                     "type": "string",
                     "description": "Reminder message (for add)"
                 },
+                "at": {
+                    "type": "string",
+                    "description": "ISO datetime for a one-time reminder, e.g. '2026-02-10T20:30:00' (local server time)"
+                },
                 "every_seconds": {
                     "type": "integer",
                     "description": "Interval in seconds (for recurring tasks)"
@@ -66,6 +71,7 @@ class CronTool(Tool):
         self,
         action: str,
         message: str = "",
+        at: str | None = None,
         every_seconds: int | None = None,
         cron_expr: str | None = None,
         at: str | None = None,
@@ -85,21 +91,21 @@ class CronTool(Tool):
             return "Error: message is required for add"
         if not self._channel or not self._chat_id:
             return "Error: no session context (channel/chat_id)"
-        
+
         # Build schedule
-        delete_after = False
-        if every_seconds:
+        if at:
+            try:
+                dt = datetime.fromisoformat(at)
+                at_ms = int(dt.timestamp() * 1000)
+            except ValueError:
+                return f"Error: invalid datetime format '{at}'. Use ISO format like '2026-02-10T20:30:00'"
+            schedule = CronSchedule(kind="at", at_ms=at_ms)
+        elif every_seconds:
             schedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
         elif cron_expr:
             schedule = CronSchedule(kind="cron", expr=cron_expr)
-        elif at:
-            from datetime import datetime
-            dt = datetime.fromisoformat(at)
-            at_ms = int(dt.timestamp() * 1000)
-            schedule = CronSchedule(kind="at", at_ms=at_ms)
-            delete_after = True
         else:
-            return "Error: either every_seconds, cron_expr, or at is required"
+            return "Error: one of 'at', 'every_seconds', or 'cron_expr' is required"
         
         job = self._cron.add_job(
             name=message[:30],
@@ -108,7 +114,7 @@ class CronTool(Tool):
             deliver=True,
             channel=self._channel,
             to=self._chat_id,
-            delete_after_run=delete_after,
+            delete_after_run=schedule.kind == "at",
         )
         return f"Created job '{job.name}' (id: {job.id})"
     
@@ -116,7 +122,35 @@ class CronTool(Tool):
         jobs = self._cron.list_jobs()
         if not jobs:
             return "No scheduled jobs."
-        lines = [f"- {j.name} (id: {j.id}, {j.schedule.kind})" for j in jobs]
+        lines = []
+        for j in jobs:
+            parts = [f"- **{j.name}** (id: {j.id})"]
+            # Schedule info
+            if j.schedule.kind == "at" and j.schedule.at_ms:
+                dt = datetime.fromtimestamp(j.schedule.at_ms / 1000)
+                parts.append(f"  fires at: {dt.strftime('%Y-%m-%d %H:%M')}")
+            elif j.schedule.kind == "every" and j.schedule.every_ms:
+                secs = j.schedule.every_ms // 1000
+                if secs >= 3600:
+                    parts.append(f"  every: {secs // 3600}h {(secs % 3600) // 60}m")
+                elif secs >= 60:
+                    parts.append(f"  every: {secs // 60}m")
+                else:
+                    parts.append(f"  every: {secs}s")
+            elif j.schedule.kind == "cron" and j.schedule.expr:
+                parts.append(f"  cron: {j.schedule.expr}")
+            # Next run
+            if j.state.next_run_at_ms:
+                nxt = datetime.fromtimestamp(j.state.next_run_at_ms / 1000)
+                parts.append(f"  next run: {nxt.strftime('%Y-%m-%d %H:%M')}")
+            # Last run
+            if j.state.last_run_at_ms:
+                last = datetime.fromtimestamp(j.state.last_run_at_ms / 1000)
+                status = j.state.last_status or "unknown"
+                parts.append(f"  last run: {last.strftime('%Y-%m-%d %H:%M')} ({status})")
+            # Message
+            parts.append(f"  message: {j.payload.message}")
+            lines.append("\n".join(parts))
         return "Scheduled jobs:\n" + "\n".join(lines)
     
     def _remove_job(self, job_id: str | None) -> str:

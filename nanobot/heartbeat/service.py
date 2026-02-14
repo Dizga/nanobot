@@ -101,8 +101,15 @@ class HeartbeatService:
     
     async def _tick(self) -> None:
         """Execute a single heartbeat tick."""
+        # Skip outside active hours (8am-11pm local time)
+        from datetime import datetime
+        hour = datetime.now().hour
+        if hour < 8 or hour >= 23:
+            logger.debug(f"Heartbeat: skipping (outside active hours, {hour}:00)")
+            return
+
         content = self._read_heartbeat_file()
-        
+
         # Skip if HEARTBEAT.md is empty or doesn't exist
         if _is_heartbeat_empty(content):
             logger.debug("Heartbeat: no tasks (HEARTBEAT.md empty)")

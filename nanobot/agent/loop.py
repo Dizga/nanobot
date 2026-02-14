@@ -4,6 +4,7 @@ import asyncio
 from contextlib import AsyncExitStack
 import json
 import json_repair
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -146,7 +147,7 @@ class AgentLoop:
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
 
-    async def _run_agent_loop(self, initial_messages: list[dict]) -> tuple[str | None, list[str]]:
+    async def _run_agent_loop(self, initial_messages: list[dict]) -> tuple[str | None, list[str], list[dict], bool, str]:
         """
         Run the agent iteration loop.
 
@@ -154,12 +155,16 @@ class AgentLoop:
             initial_messages: Starting messages for the LLM conversation.
 
         Returns:
-            Tuple of (final_content, list_of_tools_used).
+            Tuple of (final_content, tools_used, session_tool_messages,
+                       used_message_tool, sent_message_content).
         """
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        session_tool_messages: list[dict] = []
+        used_message_tool = False
+        sent_message_content = ""
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -189,20 +194,38 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                 )
 
+                # Save assistant tool_calls for session history
+                session_tool_messages.append({
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": tool_call_dicts,
+                })
+
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    if tool_call.name == "message":
+                        used_message_tool = True
+                        sent_message_content = tool_call.arguments.get("content", "")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    # Save truncated tool result for session history
+                    result_preview = (result[:200] + "...") if len(result) > 200 else result
+                    session_tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "content": result_preview,
+                    })
                 messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
                 final_content = response.content
                 break
 
-        return final_content, tools_used
+        return final_content, tools_used, session_tool_messages, used_message_tool, sent_message_content
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -244,14 +267,16 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
     
-    async def _process_message(self, msg: InboundMessage, session_key: str | None = None) -> OutboundMessage | None:
+    async def _process_message(self, msg: InboundMessage, session_key: str | None = None, save_session: bool = True) -> OutboundMessage | None:
         """
         Process a single inbound message.
-        
+
         Args:
             msg: The inbound message to process.
             session_key: Override session key (used by process_direct).
-        
+            save_session: Whether to persist the exchange to session history.
+
+
         Returns:
             The response message, or None if no response needed.
         """
@@ -297,18 +322,40 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-        final_content, tools_used = await self._run_agent_loop(initial_messages)
+        # Dump context to file for debugging
+        try:
+            debug_dir = self.workspace / "debug"
+            debug_dir.mkdir(exist_ok=True)
+            from datetime import datetime as _dt
+            debug_file = debug_dir / f"{_dt.now().strftime('%Y%m%d_%H%M%S')}_{msg.session_key.replace(':', '_')}.json"
+            debug_file.write_text(json.dumps(initial_messages, indent=2, ensure_ascii=False, default=str))
+            logger.info(f"Context dump: {debug_file}")
+        except Exception as e:
+            logger.warning(f"Failed to dump context: {e}")
+
+        final_content, tools_used, session_tool_messages, used_message_tool, sent_message_content = await self._run_agent_loop(initial_messages)
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-        
+
+        # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
-        
-        session.add_message("user", msg.content)
-        session.add_message("assistant", final_content,
-                            tools_used=tools_used if tools_used else None)
-        self.sessions.save(session)
+
+        # Save to session. For background tasks (save_session=False), only save
+        # the actual message sent to the user — not the internal heartbeat prompt.
+        if save_session:
+            session.add_message("user", msg.content)
+            for tool_msg in session_tool_messages:
+                session.messages.append({**tool_msg, "timestamp": datetime.now().isoformat()})
+                session.updated_at = datetime.now()
+            if final_content.strip():
+                session.add_message("assistant", final_content,
+                                    tools_used=tools_used if tools_used else None)
+            self.sessions.save(session)
+        elif used_message_tool:
+            session.add_message("assistant", sent_message_content)
+            self.sessions.save(session)
         
         return OutboundMessage(
             channel=msg.channel,
@@ -451,16 +498,19 @@ Respond with ONLY valid JSON, no markdown fences."""
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        save_session: bool = True,
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
-        
+
         Args:
             content: The message content.
             session_key: Session identifier (overrides channel:chat_id for session lookup).
             channel: Source channel (for tool context routing).
             chat_id: Source chat ID (for tool context routing).
-        
+            save_session: Whether to persist the exchange to session history.
+
+
         Returns:
             The agent's response.
         """
@@ -471,6 +521,6 @@ Respond with ONLY valid JSON, no markdown fences."""
             chat_id=chat_id,
             content=content
         )
-        
-        response = await self._process_message(msg, session_key=session_key)
+
+        response = await self._process_message(msg, session_key=session_key, save_session=save_session)
         return response.content if response else ""

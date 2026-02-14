@@ -369,14 +369,24 @@ def gateway(
     cron.on_job = on_cron_job
     
     # Create heartbeat service
+    # Use the primary Discord DM session so heartbeat shares conversation context
+    _hb_channel = "cli"
+    _hb_chat_id = "direct"
+    if config.channels.discord.enabled and config.channels.discord.allow_from:
+        _hb_channel = "discord"
+        _hb_chat_id = config.channels.discord.allow_from[0]
+
     async def on_heartbeat(prompt: str) -> str:
         """Execute heartbeat through the agent."""
-        return await agent.process_direct(prompt, session_key="heartbeat")
+        return await agent.process_direct(
+            prompt, channel=_hb_channel, chat_id=_hb_chat_id,
+            save_session=False,
+        )
     
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
         on_heartbeat=on_heartbeat,
-        interval_s=30 * 60,  # 30 minutes
+        interval_s=60 * 60,  # 30 minutes
         enabled=True
     )
     
