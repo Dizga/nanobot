@@ -74,7 +74,6 @@ class CronTool(Tool):
         at: str | None = None,
         every_seconds: int | None = None,
         cron_expr: str | None = None,
-        at: str | None = None,
         job_id: str | None = None,
         **kwargs: Any
     ) -> str:
