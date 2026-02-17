@@ -83,17 +83,24 @@ class WriteFileTool(Tool):
                 "content": {
                     "type": "string",
                     "description": "The content to write"
+                },
+                "append": {
+                    "type": "boolean",
+                    "description": "If true, append to the file instead of overwriting. Defaults to false."
                 }
             },
             "required": ["path", "content"]
         }
-    
-    async def execute(self, path: str, content: str, **kwargs: Any) -> str:
+
+    async def execute(self, path: str, content: str, append: bool = False, **kwargs: Any) -> str:
         try:
             file_path = _resolve_path(path, self._allowed_dir)
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content, encoding="utf-8")
-            return f"Successfully wrote {len(content)} bytes to {path}"
+            mode = "a" if append else "w"
+            with open(file_path, mode, encoding="utf-8") as f:
+                f.write(content)
+            action = "appended" if append else "wrote"
+            return f"Successfully {action} {len(content)} bytes to {path}"
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
