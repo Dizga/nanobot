@@ -96,7 +96,7 @@ Your workspace is at: {workspace_path}
 ## Communication
 
 Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
-When remembering something important, write to {workspace_path}/memory/MEMORY.md
+When you learn something new about the user, update {workspace_path}/memory/MEMORY.md using edit_file.
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
     
     def _load_bootstrap_files(self) -> str:
