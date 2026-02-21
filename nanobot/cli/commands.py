@@ -328,19 +328,26 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the nanobot gateway."""
+    import os
     from nanobot.config.loader import load_config, get_data_dir
     from nanobot.bus.queue import MessageBus
-    from nanobot.local.agent import LocalAgentLoop as AgentLoop
     from nanobot.channels.manager import ChannelManager
     from nanobot.session.manager import SessionManager
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
-    from nanobot.local.heartbeat import LocalHeartbeatService as HeartbeatService
 
-    # Patch Discord channel so ChannelManager picks up local version
-    import nanobot.channels.discord
-    from nanobot.local.discord import LocalDiscordChannel
-    nanobot.channels.discord.DiscordChannel = LocalDiscordChannel
+    use_upstream = os.environ.get("NANOBOT_USE_UPSTREAM")
+    if use_upstream:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.heartbeat.service import HeartbeatService
+        console.print("[yellow]Using upstream logic (NANOBOT_USE_UPSTREAM=1)[/yellow]")
+    else:
+        from nanobot.local.agent import LocalAgentLoop as AgentLoop
+        from nanobot.local.heartbeat import LocalHeartbeatService as HeartbeatService
+        # Patch Discord channel so ChannelManager picks up local version
+        import nanobot.channels.discord
+        from nanobot.local.discord import LocalDiscordChannel
+        nanobot.channels.discord.DiscordChannel = LocalDiscordChannel
     
     if verbose:
         import logging
