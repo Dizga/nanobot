@@ -17,6 +17,29 @@ from nanobot.config.schema import DiscordConfig
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20MB
+MAX_MESSAGE_LEN = 2000  # Discord message character limit
+
+
+def _split_message(content: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
+    """Split content into chunks within max_len, preferring line breaks."""
+    if not content:
+        return []
+    if len(content) <= max_len:
+        return [content]
+    chunks: list[str] = []
+    while content:
+        if len(content) <= max_len:
+            chunks.append(content)
+            break
+        cut = content[:max_len]
+        pos = cut.rfind('\n')
+        if pos <= 0:
+            pos = cut.rfind(' ')
+        if pos <= 0:
+            pos = max_len
+        chunks.append(content[:pos])
+        content = content[pos:].lstrip()
+    return chunks
 
 
 class DiscordChannel(BaseChannel):
@@ -32,7 +55,6 @@ class DiscordChannel(BaseChannel):
         self._heartbeat_task: asyncio.Task | None = None
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._http: httpx.AsyncClient | None = None
-        self._dm_channels: dict[str, str] = {}  # user_id -> dm_channel_id
 
     async def start(self) -> None:
         """Start the Discord gateway connection."""
@@ -52,7 +74,7 @@ class DiscordChannel(BaseChannel):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(f"Discord gateway error: {e}")
+                logger.warning("Discord gateway error: {}", e)
                 if self._running:
                     logger.info("Reconnecting to Discord gateway in 5 seconds...")
                     await asyncio.sleep(5)
@@ -73,93 +95,54 @@ class DiscordChannel(BaseChannel):
             await self._http.aclose()
             self._http = None
 
-    async def _get_dm_channel(self, user_id: str) -> str | None:
-        """Open or retrieve a DM channel for a user ID."""
-        if user_id in self._dm_channels:
-            return self._dm_channels[user_id]
-
-        if not self._http:
-            return None
-
-        headers = {"Authorization": f"Bot {self.config.token}"}
-        try:
-            resp = await self._http.post(
-                f"{DISCORD_API_BASE}/users/@me/channels",
-                headers=headers,
-                json={"recipient_id": user_id},
-            )
-            resp.raise_for_status()
-            dm_channel_id = resp.json()["id"]
-            self._dm_channels[user_id] = dm_channel_id
-            return dm_channel_id
-        except Exception as e:
-            logger.error(f"Failed to open DM channel for {user_id}: {e}")
-            return None
-
-    async def _resolve_channel_id(self, chat_id: str) -> str | None:
-        """Resolve a chat_id to a valid Discord channel ID.
-
-        If chat_id is already a channel, use it directly.  If sending
-        fails with 404, treat it as a user ID and open a DM channel.
-        """
-        # First try sending to it as-is (works for real channel IDs)
-        headers = {"Authorization": f"Bot {self.config.token}"}
-        try:
-            resp = await self._http.get(
-                f"{DISCORD_API_BASE}/channels/{chat_id}",
-                headers=headers,
-            )
-            if resp.status_code == 200:
-                return chat_id
-        except Exception:
-            pass
-
-        # Treat as user ID and open a DM
-        return await self._get_dm_channel(chat_id)
-
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Discord REST API."""
         if not self._http:
             logger.warning("Discord HTTP client not initialized")
             return
 
-        if not msg.content or not msg.content.strip():
-            logger.info(f"Skipping empty message to {msg.chat_id}")
-            return
-
-        channel_id = await self._resolve_channel_id(msg.chat_id)
-        if not channel_id:
-            logger.error(f"Could not resolve Discord channel for {msg.chat_id}")
-            return
-
-        url = f"{DISCORD_API_BASE}/channels/{channel_id}/messages"
-        payload: dict[str, Any] = {"content": msg.content}
-
-        if msg.reply_to:
-            payload["message_reference"] = {"message_id": msg.reply_to}
-            payload["allowed_mentions"] = {"replied_user": False}
-
+        url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
         headers = {"Authorization": f"Bot {self.config.token}"}
 
         try:
-            for attempt in range(3):
-                try:
-                    response = await self._http.post(url, headers=headers, json=payload)
-                    if response.status_code == 429:
-                        data = response.json()
-                        retry_after = float(data.get("retry_after", 1.0))
-                        logger.warning(f"Discord rate limited, retrying in {retry_after}s")
-                        await asyncio.sleep(retry_after)
-                        continue
-                    response.raise_for_status()
-                    return
-                except Exception as e:
-                    if attempt == 2:
-                        logger.error(f"Error sending Discord message: {e}")
-                    else:
-                        await asyncio.sleep(1)
+            chunks = _split_message(msg.content or "")
+            if not chunks:
+                return
+
+            for i, chunk in enumerate(chunks):
+                payload: dict[str, Any] = {"content": chunk}
+
+                # Only set reply reference on the first chunk
+                if i == 0 and msg.reply_to:
+                    payload["message_reference"] = {"message_id": msg.reply_to}
+                    payload["allowed_mentions"] = {"replied_user": False}
+
+                if not await self._send_payload(url, headers, payload):
+                    break  # Abort remaining chunks on failure
         finally:
-            await self._stop_typing(channel_id)
+            await self._stop_typing(msg.chat_id)
+
+    async def _send_payload(
+        self, url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> bool:
+        """Send a single Discord API payload with retry on rate-limit. Returns True on success."""
+        for attempt in range(3):
+            try:
+                response = await self._http.post(url, headers=headers, json=payload)
+                if response.status_code == 429:
+                    data = response.json()
+                    retry_after = float(data.get("retry_after", 1.0))
+                    logger.warning("Discord rate limited, retrying in {}s", retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+                response.raise_for_status()
+                return True
+            except Exception as e:
+                if attempt == 2:
+                    logger.error("Error sending Discord message: {}", e)
+                else:
+                    await asyncio.sleep(1)
+        return False
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""
@@ -170,7 +153,7 @@ class DiscordChannel(BaseChannel):
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON from Discord gateway: {raw[:100]}")
+                logger.warning("Invalid JSON from Discord gateway: {}", raw[:100])
                 continue
 
             op = data.get("op")
@@ -229,7 +212,7 @@ class DiscordChannel(BaseChannel):
                 try:
                     await self._ws.send(json.dumps(payload))
                 except Exception as e:
-                    logger.warning(f"Discord heartbeat failed: {e}")
+                    logger.warning("Discord heartbeat failed: {}", e)
                     break
                 await asyncio.sleep(interval_s)
 
@@ -250,11 +233,6 @@ class DiscordChannel(BaseChannel):
 
         if not self.is_allowed(sender_id):
             return
-
-        # For DMs (no guild_id), use sender_id as chat_id for stable session keys.
-        # For server channels, keep channel_id so multiple users share one session.
-        is_dm = not payload.get("guild_id")
-        effective_chat_id = sender_id if is_dm else channel_id
 
         content_parts = [content] if content else []
         media_paths: list[str] = []
@@ -278,7 +256,7 @@ class DiscordChannel(BaseChannel):
                 media_paths.append(str(file_path))
                 content_parts.append(f"[attachment: {file_path}]")
             except Exception as e:
-                logger.warning(f"Failed to download Discord attachment: {e}")
+                logger.warning("Failed to download Discord attachment: {}", e)
                 content_parts.append(f"[attachment: {filename} - download failed]")
 
         reply_to = (payload.get("referenced_message") or {}).get("id")
@@ -287,14 +265,13 @@ class DiscordChannel(BaseChannel):
 
         await self._handle_message(
             sender_id=sender_id,
-            chat_id=effective_chat_id,
+            chat_id=channel_id,
             content="\n".join(p for p in content_parts if p) or "[empty message]",
             media=media_paths,
             metadata={
                 "message_id": str(payload.get("id", "")),
                 "guild_id": payload.get("guild_id"),
                 "reply_to": reply_to,
-                "discord_channel_id": channel_id,
             },
         )
 

@@ -309,12 +309,17 @@ def gateway(
     """Start the nanobot gateway."""
     from nanobot.config.loader import load_config, get_data_dir
     from nanobot.bus.queue import MessageBus
-    from nanobot.agent.loop import AgentLoop
+    from nanobot.local.agent import LocalAgentLoop as AgentLoop
     from nanobot.channels.manager import ChannelManager
     from nanobot.session.manager import SessionManager
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
-    from nanobot.heartbeat.service import HeartbeatService
+    from nanobot.local.heartbeat import LocalHeartbeatService as HeartbeatService
+
+    # Patch Discord channel so ChannelManager picks up local version
+    import nanobot.channels.discord
+    from nanobot.local.discord import LocalDiscordChannel
+    nanobot.channels.discord.DiscordChannel = LocalDiscordChannel
     
     if verbose:
         import logging

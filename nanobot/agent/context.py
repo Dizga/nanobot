@@ -59,11 +59,12 @@ class ContextBuilder:
                 parts.append(f"# Active Skills\n\n{always_content}")
         
         # 2. Available skills: only show summary (agent uses read_file to load)
-        skills_summary = self.skills.build_skills_summary(available_only=True)
+        skills_summary = self.skills.build_skills_summary()
         if skills_summary:
             parts.append(f"""# Skills
 
-To use a skill, read its SKILL.md file using the read_file tool.
+The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
+Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
         
@@ -79,7 +80,9 @@ To use a skill, read its SKILL.md file using the read_file tool.
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
         
-        return f"""# nanobot
+        return f"""# nanobot 🐈
+
+You are nanobot, a helpful AI assistant. 
 
 ## Current Time
 {now} ({tz})
@@ -93,10 +96,13 @@ Your workspace is at: {workspace_path}
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
-## Communication
+IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
+Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
+For normal conversation, just respond with text - do not call the message tool.
 
-Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
-When you learn something new about the user, update {workspace_path}/memory/MEMORY.md using edit_file.
+Always be helpful, accurate, and concise. Before calling tools, briefly tell the user what you're about to do (one short sentence in the user's language).
+If you need to use tools, call them directly — never send a preliminary message like "Let me check" without actually calling a tool.
+When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
     
     def _load_bootstrap_files(self) -> str:
@@ -215,14 +221,18 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         Returns:
             Updated message list.
         """
-        msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
-        
+        msg: dict[str, Any] = {"role": "assistant"}
+
+        # Always include content — some providers (e.g. StepFun) reject
+        # assistant messages that omit the key entirely.
+        msg["content"] = content
+
         if tool_calls:
             msg["tool_calls"] = tool_calls
-        
-        # Thinking models reject history without this
-        if reasoning_content:
+
+        # Include reasoning content when provided (required by some thinking models)
+        if reasoning_content is not None:
             msg["reasoning_content"] = reasoning_content
-        
+
         messages.append(msg)
         return messages
