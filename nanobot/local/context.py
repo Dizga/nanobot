@@ -1,6 +1,11 @@
 """Local overrides for ContextBuilder."""
 
+import json
 import platform
+from datetime import datetime
+from typing import Any
+
+from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 
@@ -66,3 +71,26 @@ To use a skill, read its SKILL.md file using the read_file tool.
 {skills_summary}""")
 
         return "\n\n---\n\n".join(parts)
+
+    def build_messages(
+        self,
+        history: list[dict[str, Any]],
+        current_message: str,
+        skill_names: list[str] | None = None,
+        media: list[str] | None = None,
+        channel: str | None = None,
+        chat_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        messages = super().build_messages(history, current_message, skill_names, media, channel, chat_id)
+        self._dump_debug(messages, channel, chat_id)
+        return messages
+
+    def _dump_debug(self, messages: list[dict[str, Any]], channel: str | None, chat_id: str | None) -> None:
+        try:
+            debug_dir = self.workspace / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            name = f"{ts}_{channel}_{chat_id}.json" if channel and chat_id else f"{ts}.json"
+            (debug_dir / name).write_text(json.dumps(messages, indent=2, ensure_ascii=False, default=str))
+        except Exception as e:
+            logger.debug("Debug dump failed: {}", e)
