@@ -228,7 +228,7 @@ class LocalAgentLoop(AgentLoop):
                                     tools_used=tools_used if tools_used else None)
             self.sessions.save(session)
         elif used_message_tool:
-            session.add_message("assistant", sent_message_content)
+            session.add_message("assistant", sent_message_content, source="message_tool")
             self.sessions.save(session)
 
         # Suppress duplicate if message tool already sent (from upstream)

@@ -411,8 +411,16 @@ def gateway(
 
     async def on_heartbeat(prompt: str) -> str:
         """Execute heartbeat through the agent."""
+        # [LOCAL] Skip if no user activity since last heartbeat action
+        _hb_session_key = f"{_hb_channel}:{_hb_chat_id}"
+        session = agent.sessions.get_or_create(_hb_session_key)
+        if session.messages and session.messages[-1].get("source") == "message_tool":
+            logger.debug("Heartbeat: skipping (no user activity since last run)")
+            return "HEARTBEAT_OK"
+        # [LOCAL] Pass session_key to fix session mismatch
         return await agent.process_direct(
             prompt, channel=_hb_channel, chat_id=_hb_chat_id,
+            session_key=_hb_session_key,
             save_session=False,
         )
     
