@@ -58,12 +58,15 @@ class LocalDiscordChannel(DiscordChannel):
         return await self._get_dm_channel(chat_id)
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send with DM channel resolution and empty message guard."""
+        """Send with DM channel resolution, empty message guard, and progress filtering."""
         if not self._http:
             logger.warning("Discord HTTP client not initialized")
             return
         if not msg.content or not msg.content.strip():
             logger.info("Skipping empty message to {}", msg.chat_id)
+            return
+        if msg.metadata and msg.metadata.get("_progress"):
+            logger.debug("Skipping progress message to Discord: {}", msg.content[:80])
             return
         channel_id = await self._resolve_channel_id(msg.chat_id)
         if not channel_id:
