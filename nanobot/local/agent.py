@@ -283,7 +283,7 @@ class LocalAgentLoop(AgentLoop):
 
 ## Your tasks
 
-1. **Update MEMORY.md** ({memory_path}): Read it first, then make surgical edits to add new facts about the user (personal info, preferences, habits). Use edit_file for targeted changes. Only update if there's something new worth remembering. Remove facts that are clearly outdated. Don't add temporary or time-sensitive items.
+1. **Update MEMORY.md** ({memory_path}): Read it first, then make surgical edits to add new facts about the user (personal info, preferences, habits). Use edit_file for targeted changes. Only update if there's something new worth remembering. Remove facts that are clearly outdated. Don't add temporary or time-sensitive items. Don't add projects, tasks, or goals — Todoist is the source of truth for those.
 
 2. **Append to HISTORY.md** ({history_path}): Add a summary entry (2-5 sentences) starting with a timestamp like [YYYY-MM-DD HH:MM]. Include enough detail to be useful when found by grep later. Use write_file with append=true.
 
