@@ -8,6 +8,7 @@ import select
 import sys
 
 import typer
+from loguru import logger  # [LOCAL]
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
@@ -333,16 +334,17 @@ def gateway(
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
     from nanobot.session.manager import SessionManager
-    from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
 
     use_upstream = os.environ.get("NANOBOT_USE_UPSTREAM")
     if use_upstream:
         from nanobot.agent.loop import AgentLoop
+        from nanobot.cron.service import CronService  # [LOCAL] moved into branch
         from nanobot.heartbeat.service import HeartbeatService
         console.print("[yellow]Using upstream logic (NANOBOT_USE_UPSTREAM=1)[/yellow]")
     else:
         from nanobot.local.agent import LocalAgentLoop as AgentLoop
+        from nanobot.local.cron import LocalCronService as CronService  # [LOCAL]
         from nanobot.local.heartbeat import LocalHeartbeatService as HeartbeatService
         # Patch Discord channel so ChannelManager picks up local version
         import nanobot.channels.discord
