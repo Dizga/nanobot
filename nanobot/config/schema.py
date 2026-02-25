@@ -169,6 +169,8 @@ class QQConfig(Base):
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
+    send_progress: bool = True    # stream agent's text progress to the channel
+    send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
@@ -186,9 +188,9 @@ class AgentDefaults(Base):
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
     max_tokens: int = 8192
-    temperature: float = 0.7
-    max_tool_iterations: int = 20
-    memory_window: int = 50
+    temperature: float = 0.1
+    max_tool_iterations: int = 40
+    memory_window: int = 100
 
 
 class AgentsConfig(Base):
@@ -228,11 +230,19 @@ class ProvidersConfig(Base):
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
 
+class HeartbeatConfig(Base):
+    """Heartbeat service configuration."""
+
+    enabled: bool = True
+    interval_s: int = 30 * 60  # 30 minutes
+
+
 class GatewayConfig(Base):
     """Gateway/server configuration."""
 
     host: str = "0.0.0.0"
     port: int = 18790
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
 class WebSearchConfig(Base):
@@ -262,6 +272,7 @@ class MCPServerConfig(Base):
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
     url: str = ""  # HTTP: streamable HTTP endpoint URL
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP Headers
+    tool_timeout: int = 30  # Seconds before a tool call is cancelled
 
 
 class ToolsConfig(Base):
