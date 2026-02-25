@@ -98,9 +98,10 @@ class LocalAgentLoop(AgentLoop):
                         messages, tool_call.id, tool_call.name, result,
                     )
 
-                messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
                 final_content = self._strip_think(response.content)
+                if final_content:
+                    messages.append({"role": "assistant", "content": final_content})
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -109,6 +110,7 @@ class LocalAgentLoop(AgentLoop):
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
             )
+            messages.append({"role": "assistant", "content": final_content})
 
         return final_content, tools_used, messages, used_message_tool, sent_message_content
 
