@@ -104,6 +104,7 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
+        channels_config=config.channels,
     )
 
     # Cron callback
@@ -131,13 +132,14 @@ def gateway(
         hb_channel = "discord"
         hb_chat_id = config.channels.discord.allow_from[0]
 
+    hb_cfg = config.gateway.heartbeat
     heartbeat = LocalHeartbeatService(
         workspace=config.workspace_path,
         agent_loop=agent,
         hb_channel=hb_channel,
         hb_chat_id=hb_chat_id,
-        interval_s=60 * 60,
-        enabled=True,
+        interval_s=hb_cfg.interval_s,
+        enabled=hb_cfg.enabled,
     )
 
     # Channel manager

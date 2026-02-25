@@ -11,21 +11,18 @@ from nanobot.agent.context import ContextBuilder
 
 
 class LocalContextBuilder(ContextBuilder):
-    """Customized context builder with trimmed system prompt."""
+    """Customized context builder with trimmed, cache-stable system prompt.
+
+    Current Time is NOT in the system prompt (upstream moved it to
+    _inject_runtime_context on the user message for better prompt caching).
+    """
 
     def _get_identity(self) -> str:
-        from datetime import datetime
-        import time as _time
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
         return f"""# nanobot
-
-## Current Time
-{now} ({tz})
 
 ## Runtime
 {runtime}
@@ -36,11 +33,17 @@ Your workspace is at: {workspace_path}
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
-## Communication
+Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.
 
-Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
-When you learn something new about the user, update {workspace_path}/memory/MEMORY.md using edit_file.
-To recall past events, grep {workspace_path}/memory/HISTORY.md"""
+## Tool Call Guidelines
+- Before calling tools, you may briefly state your intent (e.g. "Let me check that"), but NEVER predict or describe the expected result before receiving it.
+- Before modifying a file, read it first to confirm its current content.
+- Do not assume a file or directory exists — use list_dir or read_file to verify.
+- If a tool call fails, analyze the error before retrying with a different approach.
+
+## Memory
+- Remember important facts: write to {workspace_path}/memory/MEMORY.md
+- Recall past events: grep {workspace_path}/memory/HISTORY.md"""
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         parts = []

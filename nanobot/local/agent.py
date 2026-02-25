@@ -1,4 +1,4 @@
-"""Local overrides for AgentLoop — surgical consolidation and tool call persistence."""
+"""Local overrides for AgentLoop — surgical consolidation, tool call persistence, save_session control."""
 
 import asyncio
 import json
@@ -38,18 +38,16 @@ class LocalAgentLoop(AgentLoop):
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict], bool, str]:
         """Run the agent loop with tool call tracking for session persistence.
 
-        Returns (final_content, tools_used, session_tool_messages,
-                 used_message_tool, sent_message_content).
+        Returns (final_content, tools_used, messages, used_message_tool, sent_message_content).
         """
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
-        session_tool_messages: list[dict] = []
         used_message_tool = False
         sent_message_content = ""
 
@@ -65,12 +63,12 @@ class LocalAgentLoop(AgentLoop):
             )
 
             if response.has_tool_calls:
-                # Stream progress (from upstream)
+                # Stream progress
                 if on_progress:
                     clean = self._strip_think(response.content)
                     if clean:
                         await on_progress(clean)
-                    await on_progress(self._tool_hint(response.tool_calls))
+                    await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
                 tool_call_dicts = [
                     {
@@ -88,13 +86,6 @@ class LocalAgentLoop(AgentLoop):
                     reasoning_content=response.reasoning_content,
                 )
 
-                # Save assistant tool_calls for session history
-                session_tool_messages.append({
-                    "role": "assistant",
-                    "content": response.content or "",
-                    "tool_calls": tool_call_dicts,
-                })
-
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
@@ -106,31 +97,30 @@ class LocalAgentLoop(AgentLoop):
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result,
                     )
-                    # Save truncated tool result for session history
-                    result_preview = (result[:200] + "...") if len(result) > 200 else result
-                    session_tool_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.name,
-                        "content": result_preview,
-                    })
 
                 messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
                 final_content = self._strip_think(response.content)
                 break
 
-        return final_content, tools_used, session_tool_messages, used_message_tool, sent_message_content
+        if final_content is None and iteration >= self.max_iterations:
+            logger.warning("Max iterations ({}) reached", self.max_iterations)
+            final_content = (
+                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+                "without completing the task. You can try breaking the task into smaller steps."
+            )
+
+        return final_content, tools_used, messages, used_message_tool, sent_message_content
 
     async def _process_message(
         self,
         msg: InboundMessage,
         session_key: str | None = None,
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
         save_session: bool = True,
     ) -> OutboundMessage | None:
-        """Process message with tool call persistence and save_session control."""
-        # System messages (inline, matches upstream pattern)
+        """Process message with tool call persistence, consolidation locks, and save_session control."""
+        # System messages
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
                                 else ("cli", msg.chat_id))
@@ -138,13 +128,13 @@ class LocalAgentLoop(AgentLoop):
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
-                history=session.get_history(max_messages=self.memory_window),
+                history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, _, _, _ = await self._run_agent_loop(messages)
-            session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-            session.add_message("assistant", final_content or "Background task completed.")
+            final_content, _, all_msgs, _, _ = await self._run_agent_loop(messages)
+            self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -158,56 +148,81 @@ class LocalAgentLoop(AgentLoop):
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            messages_to_archive = session.messages.copy()
+            lock = self._get_consolidation_lock(session.key)
+            self._consolidating.add(session.key)
+            try:
+                async with lock:
+                    snapshot = session.messages[session.last_consolidated:]
+                    if snapshot:
+                        temp = Session(key=session.key)
+                        temp.messages = list(snapshot)
+                        if not await self._consolidate_memory(temp, archive_all=True):
+                            return OutboundMessage(
+                                channel=msg.channel, chat_id=msg.chat_id,
+                                content="Memory archival failed, session not cleared. Please try again.",
+                            )
+            except Exception:
+                logger.exception("/new archival failed for {}", session.key)
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="Memory archival failed, session not cleared. Please try again.",
+                )
+            finally:
+                self._consolidating.discard(session.key)
+                self._prune_consolidation_lock(session.key, lock)
+
             session.clear()
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
-
-            async def _consolidate_and_cleanup():
-                temp = Session(key=session.key)
-                temp.messages = messages_to_archive
-                await self._consolidate_memory(temp, archive_all=True)
-
-            asyncio.create_task(_consolidate_and_cleanup())
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="New session started. Memory consolidation in progress.")
+                                  content="New session started.")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
 
-        # Consolidation guard (from upstream — prevent duplicate consolidation)
-        if len(session.messages) > self.memory_window and session.key not in self._consolidating:
+        # Background consolidation — trigger by unconsolidated count
+        unconsolidated = len(session.messages) - session.last_consolidated
+        if unconsolidated >= self.memory_window and session.key not in self._consolidating:
             self._consolidating.add(session.key)
+            lock = self._get_consolidation_lock(session.key)
 
             async def _consolidate_and_unlock():
                 try:
-                    await self._consolidate_memory(session)
+                    async with lock:
+                        await self._consolidate_memory(session)
                 finally:
                     self._consolidating.discard(session.key)
+                    self._prune_consolidation_lock(session.key, lock)
+                    _task = asyncio.current_task()
+                    if _task is not None:
+                        self._consolidation_tasks.discard(_task)
 
-            asyncio.create_task(_consolidate_and_unlock())
+            _task = asyncio.create_task(_consolidate_and_unlock())
+            self._consolidation_tasks.add(_task)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        history = session.get_history(max_messages=self.memory_window)
         initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
+            history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        # Progress callback (from upstream)
-        async def _bus_progress(content: str) -> None:
+        # Progress callback
+        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
+            meta["_tool_hint"] = tool_hint
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, tools_used, session_tool_messages, used_message_tool, sent_message_content = \
+        final_content, tools_used, all_msgs, used_message_tool, sent_message_content = \
             await self._run_agent_loop(initial_messages, on_progress=on_progress or _bus_progress)
 
         if final_content is None:
@@ -219,19 +234,13 @@ class LocalAgentLoop(AgentLoop):
         # Save to session — for background tasks (save_session=False), only save
         # the actual message sent to the user, not the internal heartbeat prompt.
         if save_session:
-            session.add_message("user", msg.content)
-            for tool_msg in session_tool_messages:
-                session.messages.append({**tool_msg, "timestamp": datetime.now().isoformat()})
-                session.updated_at = datetime.now()
-            if final_content.strip():
-                session.add_message("assistant", final_content,
-                                    tools_used=tools_used if tools_used else None)
+            self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
         elif used_message_tool:
             session.add_message("assistant", sent_message_content, source="message_tool")
             self.sessions.save(session)
 
-        # Suppress duplicate if message tool already sent (from upstream)
+        # Suppress duplicate if message tool already sent
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 return None
@@ -241,8 +250,8 @@ class LocalAgentLoop(AgentLoop):
             metadata=msg.metadata or {},
         )
 
-    async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
-        """Surgical multi-turn consolidation using restricted file tools."""
+    async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
+        """Surgical multi-turn consolidation using restricted file tools. Returns True on success."""
         if archive_all:
             old_messages = [m for m in session.messages if m["role"] in ("user", "assistant")]
             keep_count = 0
@@ -250,14 +259,14 @@ class LocalAgentLoop(AgentLoop):
         else:
             keep_count = self.memory_window // 2
             if len(session.messages) <= keep_count:
-                return
+                return True
             messages_to_process = len(session.messages) - session.last_consolidated
             if messages_to_process <= 0:
-                return
+                return True
             old_messages = [m for m in session.messages[session.last_consolidated:-keep_count]
                            if m["role"] in ("user", "assistant")]
             if len(old_messages) < keep_count:
-                return
+                return True
             logger.info("Memory consolidation: {} total, {} to consolidate, {} keep",
                         len(session.messages), len(old_messages), keep_count)
 
@@ -341,8 +350,10 @@ If there's nothing worth remembering, just say so and stop.
                 session.last_consolidated = len(session.messages) - keep_count
             logger.info("Memory consolidation done: {} messages, last_consolidated={}",
                         len(session.messages), session.last_consolidated)
+            return True
         except Exception as e:
             logger.error("Memory consolidation failed: {}", e)
+            return False
 
     async def process_direct(
         self,
@@ -351,7 +362,7 @@ If there's nothing worth remembering, just say so and stop.
         channel: str = "cli",
         chat_id: str = "direct",
         save_session: bool = True,
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> str:
         """Process a message directly with save_session control."""
         await self._connect_mcp()
