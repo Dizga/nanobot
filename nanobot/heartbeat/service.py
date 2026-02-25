@@ -10,7 +10,9 @@ from loguru import logger
 DEFAULT_HEARTBEAT_INTERVAL_S = 30 * 60
 
 # The prompt sent to agent during heartbeat
-HEARTBEAT_PROMPT = """Read HEARTBEAT.md in your workspace carefully. Follow every step listed there — do not skip any."""
+HEARTBEAT_PROMPT = """Read HEARTBEAT.md in your workspace (if it exists).
+Follow any instructions or tasks listed there.
+If nothing needs attention, reply with just: HEARTBEAT_OK"""
 
 # Token that indicates "nothing to do"
 HEARTBEAT_OK_TOKEN = "HEARTBEAT_OK"

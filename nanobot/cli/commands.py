@@ -8,7 +8,6 @@ import select
 import sys
 
 import typer
-from loguru import logger  # [LOCAL]
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
@@ -314,7 +313,6 @@ def _make_provider(config: Config):
         api_base=config.get_api_base(model),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
-        extra_body=p.extra_body if p else None,
         provider_name=provider_name,
     )
 
@@ -330,27 +328,14 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the nanobot gateway."""
-    import os
     from nanobot.config.loader import load_config, get_data_dir
     from nanobot.bus.queue import MessageBus
+    from nanobot.agent.loop import AgentLoop
     from nanobot.channels.manager import ChannelManager
     from nanobot.session.manager import SessionManager
+    from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
-
-    use_upstream = os.environ.get("NANOBOT_USE_UPSTREAM")
-    if use_upstream:
-        from nanobot.agent.loop import AgentLoop
-        from nanobot.cron.service import CronService  # [LOCAL] moved into branch
-        from nanobot.heartbeat.service import HeartbeatService
-        console.print("[yellow]Using upstream logic (NANOBOT_USE_UPSTREAM=1)[/yellow]")
-    else:
-        from nanobot.local.agent import LocalAgentLoop as AgentLoop
-        from nanobot.local.cron import LocalCronService as CronService  # [LOCAL]
-        from nanobot.local.heartbeat import LocalHeartbeatService as HeartbeatService
-        # Patch Discord channel so ChannelManager picks up local version
-        import nanobot.channels.discord
-        from nanobot.local.discord import LocalDiscordChannel
-        nanobot.channels.discord.DiscordChannel = LocalDiscordChannel
+    from nanobot.heartbeat.service import HeartbeatService
     
     if verbose:
         import logging
@@ -405,32 +390,14 @@ def gateway(
     cron.on_job = on_cron_job
     
     # Create heartbeat service
-    # Use the primary Discord DM session so heartbeat shares conversation context
-    _hb_channel = "cli"
-    _hb_chat_id = "direct"
-    if config.channels.discord.enabled and config.channels.discord.allow_from:
-        _hb_channel = "discord"
-        _hb_chat_id = config.channels.discord.allow_from[0]
-
     async def on_heartbeat(prompt: str) -> str:
         """Execute heartbeat through the agent."""
-        # [LOCAL] Skip if no user activity since last heartbeat action
-        _hb_session_key = f"{_hb_channel}:{_hb_chat_id}"
-        session = agent.sessions.get_or_create(_hb_session_key)
-        if session.messages and session.messages[-1].get("source") == "message_tool":
-            logger.debug("Heartbeat: skipping (no user activity since last run)")
-            return "HEARTBEAT_OK"
-        # [LOCAL] Pass session_key to fix session mismatch
-        return await agent.process_direct(
-            prompt, channel=_hb_channel, chat_id=_hb_chat_id,
-            session_key=_hb_session_key,
-            save_session=False,
-        )
+        return await agent.process_direct(prompt, session_key="heartbeat")
     
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
         on_heartbeat=on_heartbeat,
-        interval_s=60 * 60,  # 30 minutes
+        interval_s=30 * 60,  # 30 minutes
         enabled=True
     )
     
